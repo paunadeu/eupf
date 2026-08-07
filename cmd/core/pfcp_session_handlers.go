@@ -595,6 +595,15 @@ func composeFarInfo(far *ie.IE, farInfo ebpf.FarInfo) (ebpf.FarInfo, error) {
 				return ebpf.FarInfo{}, fmt.Errorf("IPv6 not supported yet")
 			}
 		}
+		// 3GPP Interface Type (optional): an EPC interface (S1-U/S5-S8-U/Gn/
+		// S2a-U/S2b-U, i.e. below N3) means the peer is a 4G GGSN/PGW that
+		// expects plain GTP-U — omit the 5G PDU Session Container. Absent or a
+		// 5G (N3/N9) type keeps eUPF's default 5G encapsulation.
+		if idx := findIEindex(forward, ie.TGPPInterfaceType); idx != -1 {
+			if ift, err := forward[idx].TGPPInterfaceType(); err == nil && ift < ie.TGPPInterfaceTypeN33GPPAccess {
+				farInfo.DisableGTPPSC = 1
+			}
+		}
 	}
 	transportLevelMarking, err := GetTransportLevelMarking(far)
 	if err == nil {

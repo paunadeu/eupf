@@ -114,6 +114,9 @@ struct far_info {
     __u32 remoteip;
     /* first octet DSCP value in the Type-of-Service, second octet shall contain the ToS/Traffic Class mask field, which shall be set to "0xFC". */
     __u16 transport_level_marking;
+    /* 1 = emit plain GTP-U (no 5G PDU Session Container) toward an EPC peer;
+     * 0 = keep the 5G ext header. Derived from the FAR's 3GPP Interface Type. */
+    __u8 disable_gtp_psc;
 };
 
 /* FAR ID -> FAR */

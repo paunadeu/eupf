@@ -156,6 +156,9 @@ type FarInfo struct {
 	Teid                  uint32
 	RemoteIP              uint32
 	TransportLevelMarking uint16
+	// 1 = emit plain GTP-U (no 5G PDU Session Container) toward an EPC peer;
+	// 0 = keep the 5G ext header. Set from the FAR's 3GPP Interface Type.
+	DisableGTPPSC uint8
 }
 
 func (f FarInfo) MarshalJSON() ([]byte, error) {
@@ -167,6 +170,7 @@ func (f FarInfo) MarshalJSON() ([]byte, error) {
 		"teid":                    f.Teid,
 		"remote_ip":               remoteIP.String(),
 		"transport_level_marking": f.TransportLevelMarking,
+		"disable_gtp_psc":         f.DisableGTPPSC,
 	}
 	return json.Marshal(data)
 }

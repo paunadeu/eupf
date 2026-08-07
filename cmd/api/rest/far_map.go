@@ -17,6 +17,7 @@ type FarMapElement struct {
 	Teid                  uint32 `json:"teid"`
 	RemoteIP              uint32 `json:"remote_ip"`
 	TransportLevelMarking uint16 `json:"transport_level_marking"`
+	DisableGTPPSC         uint8  `json:"disable_gtp_psc"`
 }
 
 func (h *ApiHandler) getFarValue(c *gin.Context) {
@@ -41,6 +42,7 @@ func (h *ApiHandler) getFarValue(c *gin.Context) {
 		Teid:                  value.Teid,
 		RemoteIP:              value.RemoteIP,
 		TransportLevelMarking: value.TransportLevelMarking,
+		DisableGTPPSC:         value.DisableGTPPSC,
 	})
 }
 
@@ -58,6 +60,7 @@ func (h *ApiHandler) setFarValue(c *gin.Context) {
 		Teid:                  farElement.Teid,
 		RemoteIP:              farElement.RemoteIP,
 		TransportLevelMarking: farElement.TransportLevelMarking,
+		DisableGTPPSC:         farElement.DisableGTPPSC,
 	}
 
 	if err := h.BpfObjects.IpEntrypointObjects.FarMap.Put(uint32(farElement.Id), unsafe.Pointer(&value)); err != nil {

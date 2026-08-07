@@ -159,9 +159,13 @@ static __always_inline void fill_udp_header(struct udphdr *udp, int port, int le
     udp->check = 0;
 }
 
-static __always_inline void fill_gtp_header(struct gtpuhdr *gtp, int teid, int len) {
+static __always_inline void fill_gtp_header(struct gtpuhdr *gtp, int teid, int len, __u8 with_ext) {
     *(__u8 *)gtp = GTP_FLAGS;
-    gtp->e = 1;
+    /* Set the E (extension-header-present) flag only when a PDU Session
+     * Container follows. Plain GTP-U toward an EPC peer (S5/S8/S2a) leaves it
+     * clear (TS 29.281). */
+    if (with_ext)
+        gtp->e = 1;
     gtp->message_type = GTPU_G_PDU;
     gtp->message_length = bpf_htons(len);
     gtp->teid = bpf_htonl(teid);
@@ -183,10 +187,14 @@ static __always_inline void fill_gtp_ext_header_psc(struct gtp_hdr_ext_pdu_sessi
     gtp_ext->next_ext = 0;
 }
 
-static __always_inline __u32 add_gtp_over_ip4_headers(struct packet_context *ctx, int saddr, int daddr, __u8 tos, __u8 qfi, int teid) {
-    static const size_t gtp_ext_hdr_size = sizeof(struct gtp_hdr_ext) + sizeof(struct gtp_hdr_ext_pdu_session_container);
-    static const size_t gtp_full_hdr_size = sizeof(struct gtpuhdr) + gtp_ext_hdr_size;
-    static const size_t gtp_encap_size = sizeof(struct iphdr) + sizeof(struct udphdr) + gtp_full_hdr_size;
+static __always_inline __u32 add_gtp_over_ip4_headers(struct packet_context *ctx, int saddr, int daddr, __u8 tos, __u8 qfi, int teid, __u8 disable_psc) {
+    /* Plain GTP-U (TS 29.281) toward a 4G/EPC peer (S5/S8/S2a GGSN/PGW) omits
+     * the 5G PDU Session Container extension header; a 5G N3/N9 peer keeps it.
+     * The choice is per-FAR (disable_psc, driven from PFCP) — every derived
+     * length below follows from gtp_ext_hdr_size, so both cases stay correct. */
+    const size_t gtp_ext_hdr_size = disable_psc ? 0 : (sizeof(struct gtp_hdr_ext) + sizeof(struct gtp_hdr_ext_pdu_session_container));
+    const size_t gtp_full_hdr_size = sizeof(struct gtpuhdr) + gtp_ext_hdr_size;
+    const size_t gtp_encap_size = sizeof(struct iphdr) + sizeof(struct udphdr) + gtp_full_hdr_size;
 
     // int ip_packet_len = (ctx->xdp_ctx->data_end - ctx->xdp_ctx->data) - sizeof(*eth);
     int ip_packet_len = 0;
@@ -231,21 +239,23 @@ static __always_inline __u32 add_gtp_over_ip4_headers(struct packet_context *ctx
     if ((const char *)(gtp + 1) > data_end)
         return -1;
 
-    fill_gtp_header(gtp, teid, gtp_ext_hdr_size + ip_packet_len);
+    fill_gtp_header(gtp, teid, gtp_ext_hdr_size + ip_packet_len, !disable_psc);
 
-    /* Add the GTP ext header */
-    struct gtp_hdr_ext *gtp_ext = (struct gtp_hdr_ext *)(gtp + 1);
-    if ((const char *)(gtp_ext + 1) > data_end)
-        return -1;
+    if (!disable_psc) {
+        /* Add the GTP ext header */
+        struct gtp_hdr_ext *gtp_ext = (struct gtp_hdr_ext *)(gtp + 1);
+        if ((const char *)(gtp_ext + 1) > data_end)
+            return -1;
 
-    fill_gtp_ext_header(gtp_ext);
+        fill_gtp_ext_header(gtp_ext);
 
-    /* Add the GTP PDU session container header */
-    struct gtp_hdr_ext_pdu_session_container *gtp_psc = (struct gtp_hdr_ext_pdu_session_container *)(gtp_ext + 1);
-    if ((const char *)(gtp_psc + 1) > data_end)
-        return -1;
+        /* Add the GTP PDU session container header */
+        struct gtp_hdr_ext_pdu_session_container *gtp_psc = (struct gtp_hdr_ext_pdu_session_container *)(gtp_ext + 1);
+        if ((const char *)(gtp_psc + 1) > data_end)
+            return -1;
 
-    fill_gtp_ext_header_psc(gtp_psc, qfi, PDU_SESSION_CONTAINER_PDU_TYPE_DL_PSU);
+        fill_gtp_ext_header_psc(gtp_psc, qfi, PDU_SESSION_CONTAINER_PDU_TYPE_DL_PSU);
+    }
 
     ip->check = ipv4_csum(ip, sizeof(*ip));
 
