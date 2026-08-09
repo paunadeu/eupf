@@ -69,6 +69,10 @@ static __always_inline __u16 handle_n6_packet_ipv4(struct packet_context *ctx) {
     const struct iphdr *ip4 = ctx->ip4;
     struct pdr_info *pdr = bpf_map_lookup_elem(&pdr_map_downlink_ip4, &ip4->daddr);
     if (!pdr) {
+        // TWAG uplink: match the UE by SOURCE IP too (traffic FROM the UE toward the core).
+        pdr = bpf_map_lookup_elem(&pdr_map_downlink_ip4, &ip4->saddr);
+    }
+    if (!pdr) {
         upf_printk("upf: [n6] no downlink session for ip:%pI4", &ip4->daddr);
         return DEFAULT_XDP_ACTION;
     }
