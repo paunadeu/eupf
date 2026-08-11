@@ -195,7 +195,11 @@ func (bpfObjects *BpfObjects) ConfigureMirror(collectorIP net.IP, dlReal, dlMirr
 		return fmt.Errorf("mirror collector must be IPv4, got %s", collectorIP)
 	}
 
-	cfg := LiMirrorEgressMirrorCfg{CollectorIp: binary.LittleEndian.Uint32(v4)}
+	// The map value is marshalled in the host's native byte order, and the
+	// datapath assigns it straight into the packet's network-order daddr, so
+	// convert the address bytes through NativeEndian to land network order in the
+	// map on both little- and big-endian hosts.
+	cfg := LiMirrorEgressMirrorCfg{CollectorIp: binary.NativeEndian.Uint32(v4)}
 	if err := bpfObjects.MirrorCfgDl.Put(uint32(0), &cfg); err != nil {
 		return fmt.Errorf("mirror collector config: %w", err)
 	}
@@ -214,6 +218,12 @@ func (bpfObjects *BpfObjects) ConfigureMirror(collectorIP net.IP, dlReal, dlMirr
 	}
 	if err := ul.Put(uint32(1), mirrorDevmapValue{Ifindex: ulMirror}); err != nil {
 		return fmt.Errorf("uplink mirror: %w", err)
+	}
+
+	// Arm the datapath only now that both devmaps hold their entries, so a FAR
+	// that asks to duplicate never broadcasts into an empty devmap.
+	if err := bpfObjects.MirrorEnabled.Put(uint32(0), uint32(1)); err != nil {
+		return fmt.Errorf("enable mirror: %w", err)
 	}
 	return nil
 }

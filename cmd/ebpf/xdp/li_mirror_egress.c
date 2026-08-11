@@ -19,10 +19,15 @@
 #include <bpf/bpf_endian.h>
 
 #include <linux/if_ether.h>
+#include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/udp.h>
 
 #ifndef AF_INET
 #define AF_INET 2
+#endif
+#ifndef BPF_FIB_LOOKUP_OUTPUT
+#define BPF_FIB_LOOKUP_OUTPUT (1U << 1)
 #endif
 
 /* Where a mirror device sends the intercepted copy. Slot 0 holds the downlink
@@ -88,18 +93,39 @@ int li_mirror_dl(struct xdp_md *ctx) {
     ip->daddr = cfg->collector_ip;
     ip->check = ipv4_header_csum(ip);
 
+    /* GTP-U rides UDP, and the outer UDP checksum covers a pseudo-header that
+     * includes the destination address, so rewriting daddr invalidates it.
+     * Disable it: a zero checksum is legal for IPv4 UDP and is exactly what the
+     * fork's own GTP-U encapsulation emits, so the collector accepts the copy. */
+    if (ip->protocol == IPPROTO_UDP) {
+        struct udphdr *udp = (void *)ip + sizeof(*ip);
+        if ((void *)(udp + 1) <= data_end)
+            udp->check = 0;
+    }
+
     struct bpf_fib_lookup fib = {};
     fib.family = AF_INET;
     fib.l4_protocol = ip->protocol;
     fib.tot_len = bpf_ntohs(ip->tot_len);
     fib.ipv4_src = ip->saddr;
     fib.ipv4_dst = ip->daddr;
-    fib.ifindex = ctx->ingress_ifindex;
+    /* Constrain the route to the mirror device and treat the copy as locally
+     * originated (OUTPUT), so the lookup does not depend on ip_forward and only
+     * succeeds if the collector is actually reachable out of this device. */
+    fib.ifindex = ctx->egress_ifindex;
 
-    if (bpf_fib_lookup(ctx, &fib, sizeof(fib), 0) == BPF_FIB_LKUP_RET_SUCCESS) {
-        __builtin_memcpy(eth->h_source, fib.smac, ETH_ALEN);
-        __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
-    }
+    /* A devmap egress program transmits on XDP_PASS with no stack fallback and
+     * no neighbour resolution, so a frame with an unresolved nexthop would leave
+     * the mirror device misaddressed. Drop the copy on any lookup failure rather
+     * than blackhole or misdeliver the intercept. */
+    if (bpf_fib_lookup(ctx, &fib, sizeof(fib), BPF_FIB_LOOKUP_OUTPUT) != BPF_FIB_LKUP_RET_SUCCESS)
+        return XDP_DROP;
+    /* The resolved route must leave by the mirror device itself; a route out of
+     * another interface would stamp MACs valid only on that other segment. */
+    if (fib.ifindex != ctx->egress_ifindex)
+        return XDP_DROP;
+    __builtin_memcpy(eth->h_source, fib.smac, ETH_ALEN);
+    __builtin_memcpy(eth->h_dest, fib.dmac, ETH_ALEN);
     return XDP_PASS;
 }
 

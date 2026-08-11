@@ -42,8 +42,16 @@ func TestConfigureMirror(t *testing.T) {
 	if err := o.MirrorCfgDl.Lookup(uint32(0), &cfg); err != nil {
 		t.Fatalf("lookup collector config: %v", err)
 	}
-	if want := binary.LittleEndian.Uint32(collector.To4()); cfg.CollectorIp != want {
+	if want := binary.NativeEndian.Uint32(collector.To4()); cfg.CollectorIp != want {
 		t.Errorf("collector = %#x, want %#x", cfg.CollectorIp, want)
+	}
+
+	var enabled uint32
+	if err := o.MirrorEnabled.Lookup(uint32(0), &enabled); err != nil {
+		t.Fatalf("lookup mirror_enabled: %v", err)
+	}
+	if enabled != 1 {
+		t.Errorf("mirror_enabled = %d, want 1 after ConfigureMirror", enabled)
 	}
 
 	var real, mirror mirrorDevmapValue

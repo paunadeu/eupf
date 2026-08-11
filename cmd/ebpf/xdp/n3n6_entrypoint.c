@@ -62,7 +62,14 @@ static __always_inline int is_local_ip(__u32 ip)
  * in one terminal action, and the original packet is forwarded by that same
  * action so a stalled mirror can never hold up production traffic. */
 static __always_inline int far_wants_mirror(const struct far_info *far) {
-    return (far->action & FAR_DUPL) && far->dupl_remoteip;
+    if (!(far->action & FAR_DUPL) || !far->dupl_remoteip)
+        return 0;
+    /* Only broadcast once the mirror devmaps are populated. Broadcasting into an
+     * empty devmap frees the frame, so without this gate an armed FAR would drop
+     * the bearer instead of forwarding it. */
+    __u32 k = 0;
+    __u32 *enabled = bpf_map_lookup_elem(&mirror_enabled, &k);
+    return enabled && *enabled;
 }
 
 static __always_inline enum xdp_action send_to_gtp_tunnel(struct packet_context *ctx, int srcip, int dstip, __u8 tos, __u8 qfi, int teid, __u8 disable_psc, const struct far_info *far) {

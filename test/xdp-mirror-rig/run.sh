@@ -37,8 +37,12 @@ mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
 attach_pass() { # dev [netns]
     local dev=$1 ns=$2 pfx=""
     [ -n "$ns" ] && pfx="ip netns exec $ns"
-    $pfx ip link set dev "$dev" xdpdrv obj "$RIG/clone_dv.o" sec xdp/pass 2>/dev/null \
-        || $pfx ip link set dev "$dev" xdpgeneric obj "$RIG/clone_dv.o" sec xdp/pass
+    if $pfx ip link set dev "$dev" xdpdrv obj "$RIG/clone_dv.o" sec xdp/pass 2>/dev/null; then
+        echo "  $dev: xdp_pass native"
+    else
+        $pfx ip link set dev "$dev" xdpgeneric obj "$RIG/clone_dv.o" sec xdp/pass
+        echo "  WARNING $dev: xdp_pass fell back to generic; native ndo_xdp_xmit needs the peer NAPI, a RIG_FAIL here is the environment, not the datapath"
+    fi
 }
 
 cleanup() { ip netns del src 2>/dev/null || true; ip link del vout 2>/dev/null || true; ip link del vmir 2>/dev/null || true; }
@@ -59,6 +63,12 @@ ip link add vout type veth peer name vout_p
 ip link add vmir type veth peer name vmir_p
 for d in vout vout_p vmir vmir_p; do ip link set $d up; done
 attach_pass vout_p; attach_pass vmir_p
+
+# The downlink egress program does an OUTPUT fib lookup for the collector out of
+# the mirror device, so give it a route and a static neighbour; without them the
+# lookup fails and the program correctly drops the copy.
+ip route add 203.0.113.7/32 dev vmir
+ip neigh replace 203.0.113.7 dev vmir lladdr 02:00:00:00:00:99 nud permanent
 
 export VIN=vin VOUT=vout VMIR=vmir VOUT_P=vout_p VMIR_P=vmir_p
 export LI_OBJ="$REPO/cmd/ebpf/limirroregress_bpf.o" CLONE_OBJ="$RIG/clone_dv.o"

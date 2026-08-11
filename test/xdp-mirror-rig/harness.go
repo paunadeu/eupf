@@ -13,6 +13,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// A non-palindromic collector so an endianness bug in the collector_ip path
+// shows up on the wire (an all-equal address like 9.9.9.9 would hide it).
+const collectorIP = "203.0.113.7"
+
 // devmapVal mirrors the kernel's struct bpf_devmap_val: a target ifindex plus an
 // optional per-device egress program fd.
 type devmapVal struct {
@@ -21,7 +25,7 @@ type devmapVal struct {
 }
 
 type mirrorCfg struct {
-	CollectorIP uint32 // network order
+	CollectorIP uint32
 }
 
 func ifindex(name string) int {
@@ -42,32 +46,70 @@ func openCapture(idx int) int {
 	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Protocol: htons(unix.ETH_P_ALL), Ifindex: idx}); err != nil {
 		panic(err)
 	}
-	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 3})
+	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 1})
 	return fd
 }
 
-// firstICMPDst reads frames until it finds an IPv4 ICMP echo request and returns
-// its outer destination address, or "" on timeout.
-func firstICMPDst(fd int) string {
+// ipv4ChecksumOK folds the 20-byte IPv4 header; a valid header sums to 0xffff.
+func ipv4ChecksumOK(hdr []byte) bool {
+	var sum uint32
+	for i := 0; i < 20; i += 2 {
+		sum += uint32(hdr[i])<<8 | uint32(hdr[i+1])
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	return sum == 0xffff
+}
+
+type capture struct {
+	total      int
+	dsts       map[string]int
+	badIPSum   int
+	udpZero    int // frames whose outer UDP checksum field is zero
+	udpNonspec int // frames whose outer UDP checksum field is non-zero
+}
+
+// collectUDP reads every IPv4/UDP frame seen on the socket within the window,
+// tallying outer destinations, any packet whose IPv4 header checksum does not
+// verify, and how many carry a zero vs non-zero outer UDP checksum. GTP-U rides
+// UDP, so this is the production-shaped case: the mirror copy must have its UDP
+// checksum zeroed after the destination rewrite, while the real-egress copy
+// keeps the sender's original non-zero checksum. Reading the whole burst, not
+// just the first frame, is what lets the rig catch an intermittent bug.
+func collectUDP(fd int) capture {
+	c := capture{dsts: map[string]int{}}
 	buf := make([]byte, 2048)
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		n, _, err := unix.Recvfrom(fd, buf, 0)
 		if err != nil {
-			return ""
+			continue // timeout tick; keep draining until the deadline
 		}
-		if n < 34 {
-			continue
+		if n < 42 || buf[12] != 0x08 || buf[13] != 0x00 || buf[23] != 17 {
+			continue // not IPv4 UDP
 		}
-		if buf[12] != 0x08 || buf[13] != 0x00 { // not IPv4
-			continue
+		c.total++
+		c.dsts[net.IP(buf[30:34]).String()]++
+		if !ipv4ChecksumOK(buf[14:34]) {
+			c.badIPSum++
 		}
-		if buf[23] != 1 { // not ICMP
-			continue
+		if buf[40] == 0 && buf[41] == 0 {
+			c.udpZero++
+		} else {
+			c.udpNonspec++
 		}
-		return net.IP(buf[30:34]).String()
 	}
-	return ""
+	return c
+}
+
+func onlyDst(c capture) string {
+	if len(c.dsts) == 1 {
+		for d := range c.dsts {
+			return d
+		}
+	}
+	return fmt.Sprintf("%v", c.dsts)
 }
 
 func main() {
@@ -97,7 +139,7 @@ func main() {
 	}
 	defer li.Close()
 	egress := li.Programs["li_mirror_dl"]
-	collector := binary.LittleEndian.Uint32(net.ParseIP("9.9.9.9").To4())
+	collector := binary.NativeEndian.Uint32(net.ParseIP(collectorIP).To4())
 	if err := li.Maps["mirror_cfg_dl"].Put(uint32(0), mirrorCfg{CollectorIP: collector}); err != nil {
 		panic(err)
 	}
@@ -120,7 +162,7 @@ func main() {
 		panic(fmt.Sprintf("devmap put mirror+prog: %v", err))
 	}
 
-	// Native XDP on the ingress device. The generator (ping from the peer netns)
+	// Native XDP on the ingress device. The generator (UDP from the peer netns)
 	// produces proper-headroom skbs, which drive the veth native RX path, unlike
 	// a raw AF_PACKET inject.
 	lnk, err := link.AttachXDP(link.XDPOptions{Program: cl.Programs["clone_bcast"], Interface: vin, Flags: link.XDPDriverMode})
@@ -134,17 +176,32 @@ func main() {
 	capMir := openCapture(vmirP)
 	time.Sleep(200 * time.Millisecond)
 
-	// Generator: flood-ping vin's address from the peer namespace. The echo
-	// requests arrive at vin's native XDP RX and are broadcast-cloned.
-	ping := exec.Command("ip", "netns", "exec", "src", "ping", "-f", "-w", "2", "10.0.0.1")
-	_ = ping.Run() // 100% loss is expected (requests are redirected, never replied)
+	// Generator: UDP datagrams toward vin's address from the peer namespace. GTP-U
+	// rides UDP, so this is the production-shaped packet. One ping first warms the
+	// ARP entry; then a burst of UDP, each with a kernel-computed (non-zero) outer
+	// UDP checksum, arrives at vin's native XDP RX and is broadcast-cloned.
+	_ = exec.Command("ip", "netns", "exec", "src", "ping", "-c", "1", "-W", "1", "10.0.0.1").Run()
+	gen := exec.Command("ip", "netns", "exec", "src", "bash", "-c",
+		"for i in $(seq 300); do printf test > /dev/udp/10.0.0.1/9999; done")
+	_ = gen.Run()
 
-	realDst := firstICMPDst(capReal)
-	mirDst := firstICMPDst(capMir)
-	fmt.Printf("real-egress outer dst = %q (want 10.0.0.1, untouched)\n", realDst)
-	fmt.Printf("mirror     outer dst = %q (want 9.9.9.9, re-encapped to collector)\n", mirDst)
-	if realDst == "10.0.0.1" && mirDst == "9.9.9.9" {
-		fmt.Println("RIG_PASS: native XDP broadcast clone delivered both copies; egress program re-encapped only the mirror copy")
+	real := collectUDP(capReal)
+	mir := collectUDP(capMir)
+	fmt.Printf("real-egress: %d UDP frames, dst=%s, bad-ip-csum=%d, udp-csum zero/nonzero=%d/%d\n",
+		real.total, onlyDst(real), real.badIPSum, real.udpZero, real.udpNonspec)
+	fmt.Printf("mirror     : %d UDP frames, dst=%s, bad-ip-csum=%d, udp-csum zero/nonzero=%d/%d\n",
+		mir.total, onlyDst(mir), mir.badIPSum, mir.udpZero, mir.udpNonspec)
+
+	// Real-egress copy: untouched (original destination, sender's non-zero UDP
+	// checksum preserved on at least some frames, valid IPv4 header).
+	realOK := real.total > 0 && len(real.dsts) == 1 && real.dsts["10.0.0.1"] == real.total &&
+		real.badIPSum == 0 && real.udpNonspec > 0
+	// Mirror copy: re-pointed at the collector, IPv4 checksum recomputed, and the
+	// outer UDP checksum zeroed on every frame so the collector accepts it.
+	mirOK := mir.total > 0 && len(mir.dsts) == 1 && mir.dsts[collectorIP] == mir.total &&
+		mir.badIPSum == 0 && mir.udpNonspec == 0 && mir.udpZero == mir.total
+	if realOK && mirOK {
+		fmt.Println("RIG_PASS: real-egress copies untouched (dst + non-zero UDP csum preserved); every mirror copy re-encapped to the collector with a valid IPv4 checksum and a zeroed UDP checksum")
 	} else {
 		fmt.Println("RIG_FAIL")
 		os.Exit(1)

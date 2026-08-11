@@ -146,13 +146,18 @@ struct
 
 /* Interception mirror fan-out. A broadcast redirect into one of these copies
  * the frame to every device it holds, so each map carries exactly its own
- * direction's real egress device and the mirror device. Both entries are
- * populated at startup from configured ifindexes; an empty map makes the
- * broadcast a no-op, which is why the datapath also gates on the FAR before
- * redirecting. Two maps because the real egress device is fixed per direction.
- * The value is bpf_devmap_val, not a bare ifindex, so the mirror entry can also
- * carry a per-device egress program that re-encapsulates the copy toward the
- * collector while the real-egress entry stays a plain forward. */
+ * direction's real egress device and the mirror device. Two maps because the
+ * real egress device is fixed per direction. The value is bpf_devmap_val, not a
+ * bare ifindex, so the mirror entry can also carry a per-device egress program
+ * that re-encapsulates the copy toward the collector while the real-egress entry
+ * stays a plain forward.
+ *
+ * A broadcast into an EMPTY devmap is not a no-op: the kernel finds no
+ * destination and frees the frame, which would drop the very traffic we meant
+ * to forward-and-copy. So the datapath must not broadcast until these maps are
+ * populated. That is what mirror_enabled below gates: ConfigureMirror fills the
+ * devmaps and only then sets the flag, so a FAR that asks to duplicate before
+ * the mirror is wired forwards normally instead of black-holing the bearer. */
 struct
 {
     __uint(type, BPF_MAP_TYPE_DEVMAP);
@@ -168,3 +173,14 @@ struct
     __uint(value_size, sizeof(struct bpf_devmap_val));
     __uint(max_entries, 2);
 } mirror_devmap_ul SEC(".maps");
+
+/* Set to 1 by ConfigureMirror once both devmaps hold their real-plus-mirror
+ * entries. Until then the datapath never broadcasts, so an armed FAR forwards
+ * normally rather than dropping the bearer into an empty devmap. */
+struct
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, __u32);
+    __uint(max_entries, 1);
+} mirror_enabled SEC(".maps");
