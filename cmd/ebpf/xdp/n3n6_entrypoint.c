@@ -55,11 +55,23 @@ static __always_inline int is_local_ip(__u32 ip)
     return (ip == global_config.n3_ipv4_address || ip == global_config.n9_ipv4_address);
 }
 
-static __always_inline enum xdp_action send_to_gtp_tunnel(struct packet_context *ctx, int srcip, int dstip, __u8 tos, __u8 qfi, int teid, __u8 disable_psc) {
+/* A FAR with the DUPL apply-action and a programmed duplicate peer asks for a
+ * second copy toward an interception collector. XDP resolves one action per
+ * packet and has no clone helper, so the copy comes from a broadcast redirect:
+ * it fans the frame to the direction's real egress device and the mirror device
+ * in one terminal action, and the original packet is forwarded by that same
+ * action so a stalled mirror can never hold up production traffic. */
+static __always_inline int far_wants_mirror(const struct far_info *far) {
+    return (far->action & FAR_DUPL) && far->dupl_remoteip;
+}
+
+static __always_inline enum xdp_action send_to_gtp_tunnel(struct packet_context *ctx, int srcip, int dstip, __u8 tos, __u8 qfi, int teid, __u8 disable_psc, const struct far_info *far) {
     if (-1 == add_gtp_over_ip4_headers(ctx, srcip, dstip, tos, qfi, teid, disable_psc))
         return XDP_ABORTED;
     upf_printk("upf: send gtp pdu %pI4 -> %pI4", &ctx->ip4->saddr, &ctx->ip4->daddr);
     increment_counter(ctx->n3_n6_counter, tx_n3);
+    if (far_wants_mirror(far))
+        return bpf_redirect_map(&mirror_devmap_dl, 0, BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS);
     return route_ipv4(ctx->xdp_ctx, ctx->eth, ctx->ip4);
 }
 
@@ -129,7 +141,7 @@ static __always_inline __u16 handle_n6_packet_ipv4(struct packet_context *ctx) {
     update_urr(pdr->urr2_id, 0, packet_size);
 
     upf_printk("upf: [n6] use mapping %pI4 -> teid:%u", &ip4->daddr, far->teid);
-    return send_to_gtp_tunnel(ctx, global_config.n3_ipv4_address, far->remoteip, tos, qer->qfi, far->teid, far->disable_gtp_psc);
+    return send_to_gtp_tunnel(ctx, global_config.n3_ipv4_address, far->remoteip, tos, qer->qfi, far->teid, far->disable_gtp_psc, far);
 }
 
 static __always_inline enum xdp_action handle_n6_packet_ipv6(struct packet_context *ctx) {
@@ -192,7 +204,7 @@ static __always_inline enum xdp_action handle_n6_packet_ipv6(struct packet_conte
     update_urr(pdr->urr2_id, 0, packet_size);
 
     upf_printk("upf: [n6] use mapping %pI6c -> teid:%u", &ip6->daddr, far->teid);
-    return send_to_gtp_tunnel(ctx, global_config.n3_ipv4_address, far->remoteip, tos, qer->qfi, far->teid, far->disable_gtp_psc);
+    return send_to_gtp_tunnel(ctx, global_config.n3_ipv4_address, far->remoteip, tos, qer->qfi, far->teid, far->disable_gtp_psc, far);
 }
 
 static __always_inline enum xdp_action handle_gtp_packet(struct packet_context *ctx) {
@@ -364,11 +376,14 @@ static __always_inline enum xdp_action handle_gtp_packet(struct packet_context *
     /*
      *   Step 4: Route packet finally
      */
-    if (ctx->ip4) {
+    if (ctx->ip4 || ctx->ip6) {
         increment_counter(ctx->n3_n6_counter, tx_n6);
+        if (far_wants_mirror(far))
+            return bpf_redirect_map(&mirror_devmap_ul, 0, BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS);
+    }
+    if (ctx->ip4) {
         return route_ipv4(ctx->xdp_ctx, ctx->eth, ctx->ip4);
     } else if (ctx->ip6) {
-        increment_counter(ctx->n3_n6_counter, tx_n6);
         return route_ipv6(ctx->xdp_ctx, ctx->eth, ctx->ip6);
     } else {
         return XDP_ABORTED;

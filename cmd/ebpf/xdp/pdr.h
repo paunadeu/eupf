@@ -133,3 +133,35 @@ struct
     __type(value, struct far_info);
     __uint(max_entries, FAR_MAP_SIZE);
 } far_map SEC(".maps");
+
+/* bpf_redirect_map broadcast flags. These are UAPI from kernel 5.13, the same
+ * floor the broadcast redirect itself needs; define them when the build headers
+ * are older than the 5.13+ runtime that honours them. */
+#ifndef BPF_F_BROADCAST
+#define BPF_F_BROADCAST (1ULL << 3)
+#endif
+#ifndef BPF_F_EXCLUDE_INGRESS
+#define BPF_F_EXCLUDE_INGRESS (1ULL << 4)
+#endif
+
+/* Interception mirror fan-out. A broadcast redirect into one of these copies
+ * the frame to every device it holds, so each map carries exactly its own
+ * direction's real egress device and the mirror device. Both entries are
+ * populated at startup from configured ifindexes; an empty map makes the
+ * broadcast a no-op, which is why the datapath also gates on the FAR before
+ * redirecting. Two maps because the real egress device is fixed per direction. */
+struct
+{
+    __uint(type, BPF_MAP_TYPE_DEVMAP);
+    __type(key, __u32);
+    __type(value, __u32);
+    __uint(max_entries, 2);
+} mirror_devmap_dl SEC(".maps");
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_DEVMAP);
+    __type(key, __u32);
+    __type(value, __u32);
+    __uint(max_entries, 2);
+} mirror_devmap_ul SEC(".maps");
