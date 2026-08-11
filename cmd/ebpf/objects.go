@@ -1,8 +1,11 @@
 package ebpf
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"sync"
 
@@ -27,6 +30,7 @@ import (
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpf LiMirrorEgress 	xdp/li_mirror_egress.c -- -I. -O2 -Wall
 type BpfObjects struct {
 	IpEntrypointObjects
+	LiMirrorEgressObjects
 
 	farIdTracker *IdTracker
 	qerIdTracker *IdTracker
@@ -131,6 +135,15 @@ func (bpfObjects *BpfObjects) Load() error {
 		return err
 	}
 
+	// The interception mirror egress program and its collector config live in a
+	// separate object. It is small and self-contained (it shares no maps with the
+	// main pipeline), so load it unconditionally; it stays idle until the mirror
+	// devmaps are populated by ConfigureMirror.
+	if err := LoadLiMirrorEgressObjects(&bpfObjects.LiMirrorEgressObjects, nil); err != nil {
+		log.Warn().Msgf("Failed to load mirror egress objects: %s", err)
+		return err
+	}
+
 	if info, err := bpfObjects.FarMap.Info(); err == nil {
 		bpfObjects.farIdTracker = NewIdTracker(info.MaxEntries)
 
@@ -156,7 +169,53 @@ func (bpfObjects *BpfObjects) Load() error {
 func (bpfObjects *BpfObjects) Close() error {
 	return CloseAllObjects(
 		&bpfObjects.IpEntrypointObjects,
+		&bpfObjects.LiMirrorEgressObjects,
 	)
+}
+
+// mirrorDevmapValue mirrors the kernel's struct bpf_devmap_val: a target
+// ifindex and an optional per-device egress program fd (zero for a plain
+// forward).
+type mirrorDevmapValue struct {
+	Ifindex   uint32
+	BpfProgFD uint32
+}
+
+// ConfigureMirror wires the interception fan-out. Each direction's devmap gets
+// the real egress device at slot 0 and the mirror device at slot 1, so a
+// broadcast redirect reaches both. The downlink mirror slot carries the
+// re-encapsulation egress program and the collector address it rewrites the
+// outer destination toward. The uplink mirror slot forwards the raw clone; its
+// re-encapsulation program is not built yet, so the uplink copy reaches the
+// mirror device as the decapsulated inner packet for now. The collector must be
+// IPv4.
+func (bpfObjects *BpfObjects) ConfigureMirror(collectorIP net.IP, dlReal, dlMirror, ulReal, ulMirror uint32) error {
+	v4 := collectorIP.To4()
+	if v4 == nil {
+		return fmt.Errorf("mirror collector must be IPv4, got %s", collectorIP)
+	}
+
+	cfg := LiMirrorEgressMirrorCfg{CollectorIp: binary.LittleEndian.Uint32(v4)}
+	if err := bpfObjects.MirrorCfgDl.Put(uint32(0), &cfg); err != nil {
+		return fmt.Errorf("mirror collector config: %w", err)
+	}
+
+	dl := bpfObjects.MirrorDevmapDl
+	if err := dl.Put(uint32(0), mirrorDevmapValue{Ifindex: dlReal}); err != nil {
+		return fmt.Errorf("downlink real egress: %w", err)
+	}
+	if err := dl.Put(uint32(1), mirrorDevmapValue{Ifindex: dlMirror, BpfProgFD: uint32(bpfObjects.LiMirrorDl.FD())}); err != nil {
+		return fmt.Errorf("downlink mirror: %w", err)
+	}
+
+	ul := bpfObjects.MirrorDevmapUl
+	if err := ul.Put(uint32(0), mirrorDevmapValue{Ifindex: ulReal}); err != nil {
+		return fmt.Errorf("uplink real egress: %w", err)
+	}
+	if err := ul.Put(uint32(1), mirrorDevmapValue{Ifindex: ulMirror}); err != nil {
+		return fmt.Errorf("uplink mirror: %w", err)
+	}
+	return nil
 }
 
 type LoaderFunc func(obj interface{}, opts *ebpf.CollectionOptions) error
