@@ -31,9 +31,10 @@
 #endif
 
 /* Where a mirror device sends the intercepted copy. Slot 0 holds the downlink
- * collector; it is populated from configuration at startup. An unset or zero
- * collector makes the program ship the clone unchanged rather than misdeliver
- * it. */
+ * collector; it is populated from configuration at startup. A zero collector
+ * cannot be re-encapsulated toward, so a clone that finds one is dropped rather
+ * than misdelivered; ConfigureMirror rejects an unspecified collector so this
+ * should never happen at runtime. */
 struct mirror_cfg {
     __u32 collector_ip; /* outer IPv4 destination to rewrite to (network order) */
 };

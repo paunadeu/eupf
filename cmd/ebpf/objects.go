@@ -194,6 +194,12 @@ func (bpfObjects *BpfObjects) ConfigureMirror(collectorIP net.IP, dlReal, dlMirr
 	if v4 == nil {
 		return fmt.Errorf("mirror collector must be IPv4, got %s", collectorIP)
 	}
+	// A zero collector is what the datapath drops on, so reject it (and other
+	// non-unicast targets) here rather than arm a mirror that silently discards
+	// every intercept copy.
+	if collectorIP.IsUnspecified() || collectorIP.IsMulticast() || collectorIP.IsLoopback() || collectorIP.Equal(net.IPv4bcast) {
+		return fmt.Errorf("mirror collector must be a routable unicast address, got %s", collectorIP)
+	}
 
 	// The map value is marshalled in the host's native byte order, and the
 	// datapath assigns it straight into the packet's network-order daddr, so

@@ -72,4 +72,13 @@ func TestConfigureMirror(t *testing.T) {
 	if mirror.BpfProgFD == 0 {
 		t.Error("mirror slot has no egress program attached")
 	}
+
+	// A zero collector is the address the datapath drops on, so ConfigureMirror
+	// must reject it, and other non-unicast targets, instead of arming a mirror
+	// that discards every copy.
+	for _, bad := range []string{"0.0.0.0", "224.0.0.1", "255.255.255.255", "127.0.0.1"} {
+		if err := o.ConfigureMirror(net.ParseIP(bad), idx, idx, idx, idx); err == nil {
+			t.Errorf("ConfigureMirror accepted non-unicast collector %s, want an error", bad)
+		}
+	}
 }
