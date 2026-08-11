@@ -117,6 +117,12 @@ struct far_info {
     /* 1 = emit plain GTP-U (no 5G PDU Session Container) toward an EPC peer;
      * 0 = keep the 5G ext header. Derived from the FAR's 3GPP Interface Type. */
     __u8 disable_gtp_psc;
+    /* Duplication target, from the FAR Duplicating Parameters. A second GTP-U
+     * copy of the matched packet goes to this TEID/peer when action has FAR_DUPL
+     * set. Zero remoteip means no target is programmed. */
+    __u8 dupl_outer_header_creation;
+    __u32 dupl_teid;
+    __u32 dupl_remoteip;
 };
 
 /* FAR ID -> FAR */

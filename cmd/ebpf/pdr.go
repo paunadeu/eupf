@@ -159,6 +159,12 @@ type FarInfo struct {
 	// 1 = emit plain GTP-U (no 5G PDU Session Container) toward an EPC peer;
 	// 0 = keep the 5G ext header. Set from the FAR's 3GPP Interface Type.
 	DisableGTPPSC uint8
+	// Duplication target, from the FAR Duplicating Parameters. A second GTP-U
+	// copy of the matched packet goes to this TEID/peer when Action has FAR_DUPL
+	// set. Zero DuplRemoteIP means no target is programmed.
+	DuplOuterHeaderCreation uint8
+	DuplTeid                uint32
+	DuplRemoteIP            uint32
 }
 
 func (f FarInfo) MarshalJSON() ([]byte, error) {

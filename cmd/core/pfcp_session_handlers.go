@@ -609,6 +609,28 @@ func composeFarInfo(far *ie.IE, farInfo ebpf.FarInfo) (ebpf.FarInfo, error) {
 	if err == nil {
 		farInfo.TransportLevelMarking = transportLevelMarking
 	}
+	// Duplicating Parameters carry the mirror target: a second GTP-U copy of the
+	// matched packet toward an interception collector. The action's FAR_DUPL bit
+	// (already folded into farInfo.Action above) gates whether the datapath acts
+	// on it; here we only harvest the destination TEID and peer address.
+	var dupl []*ie.IE
+	var derr error
+	if far.Type == ie.CreateFAR {
+		dupl, derr = far.DuplicatingParameters()
+	} else if far.Type == ie.UpdateFAR {
+		dupl, derr = far.UpdateDuplicatingParameters()
+	}
+	if derr == nil {
+		if idx := findIEindex(dupl, 84); idx != -1 { // Outer Header Creation
+			if ohc, e := dupl[idx].OuterHeaderCreation(); e == nil {
+				farInfo.DuplOuterHeaderCreation = uint8(ohc.OuterHeaderCreationDescription >> 8)
+				farInfo.DuplTeid = ohc.TEID
+				if ohc.HasIPv4() {
+					farInfo.DuplRemoteIP = binary.LittleEndian.Uint32(ohc.IPv4Address)
+				}
+			}
+		}
+	}
 	return farInfo, nil
 }
 
