@@ -80,6 +80,29 @@ func main() {
 		log.Info().Msgf("Attached XDP program to iface %q (index %d)", iface.Name, iface.Index)
 	}
 
+	// Arm the SORM interception mirror if configured. Without this the mirror
+	// devmaps stay empty and the mirror_enabled gate keeps a duplicating FAR
+	// forwarding normally, so leaving it unset is safe, not a silent drop.
+	if config.Conf.Mirror.Enabled {
+		m := config.Conf.Mirror
+		if m.Collector == "" || m.Device == "" || m.DownlinkEgress == "" || m.UplinkEgress == "" {
+			log.Fatal().Msg("mirror enabled but collector, device, downlink_egress and uplink_egress must all be set")
+		}
+		ifindexOf := func(name string) uint32 {
+			iface, err := net.InterfaceByName(name)
+			if err != nil {
+				log.Fatal().Msgf("mirror: lookup iface %q: %s", name, err.Error())
+			}
+			return uint32(iface.Index)
+		}
+		device := ifindexOf(m.Device)
+		if err := bpfObjects.ConfigureMirror(net.ParseIP(m.Collector),
+			ifindexOf(m.DownlinkEgress), device, ifindexOf(m.UplinkEgress), device); err != nil {
+			log.Fatal().Msgf("mirror: configure: %s", err.Error())
+		}
+		log.Info().Msgf("SORM mirror armed: collector %s out of iface %q", m.Collector, m.Device)
+	}
+
 	log.Info().Msgf("Initialize resources: UEIP pool (CIDR: \"%s\"), TEID pool (size: %d)", config.Conf.UEIPPool, config.Conf.FTEIDPool)
 	var err error
 	resourceManager, err := service.NewResourceManager(config.Conf.UEIPPool, config.Conf.FTEIDPool)

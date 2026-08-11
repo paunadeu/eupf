@@ -73,22 +73,27 @@ int li_mirror_dl(struct xdp_md *ctx) {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
 
+    /* This program runs only on the cloned frame for the mirror device, so a
+     * drop here never touches the real-egress copy or production forwarding. A
+     * downlink clone is always a GTP-U/UDP/IPv4 PDU, so anything else, or a
+     * missing collector, is a frame we cannot re-encapsulate: drop it rather than
+     * transmit an un-re-encapped copy to the collector. */
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return XDP_DROP;
     if (eth->h_proto != bpf_htons(ETH_P_IP))
-        return XDP_PASS;
+        return XDP_DROP;
 
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
         return XDP_DROP;
-    if (ip->ihl != 5) /* outer header has no options; leave anything else alone */
-        return XDP_PASS;
+    if (ip->ihl != 5) /* an outer GTP-U header has no options */
+        return XDP_DROP;
 
     __u32 key = 0;
     struct mirror_cfg *cfg = bpf_map_lookup_elem(&mirror_cfg_dl, &key);
     if (!cfg || !cfg->collector_ip)
-        return XDP_PASS;
+        return XDP_DROP;
 
     ip->daddr = cfg->collector_ip;
     ip->check = ipv4_header_csum(ip);

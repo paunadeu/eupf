@@ -36,6 +36,18 @@ type UpfConfig struct {
 	FTEIDPool               uint32   `mapstructure:"teid_pool" json:"teid_pool"`
 	FeatureUEIP             bool     `mapstructure:"feature_ueip" json:"feature_ueip"`
 	FeatureFTUP             bool     `mapstructure:"feature_ftup" json:"feature_ftup"`
+	Mirror                  MirrorConfig `mapstructure:"mirror" json:"mirror"`
+}
+
+// MirrorConfig arms the SORM interception mirror. When Enabled, the data plane
+// duplicates a matched bearer's packets toward Collector out of Device, using
+// DownlinkEgress and UplinkEgress as the real egress devices per direction.
+type MirrorConfig struct {
+	Enabled        bool   `mapstructure:"enabled" json:"enabled"`
+	Collector      string `mapstructure:"collector" validate:"omitempty,ipv4" json:"collector"`
+	Device         string `mapstructure:"device" json:"device"`
+	DownlinkEgress string `mapstructure:"downlink_egress" json:"downlink_egress"`
+	UplinkEgress   string `mapstructure:"uplink_egress" json:"uplink_egress"`
 }
 
 func init() {
