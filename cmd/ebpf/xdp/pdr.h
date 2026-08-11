@@ -149,19 +149,22 @@ struct
  * direction's real egress device and the mirror device. Both entries are
  * populated at startup from configured ifindexes; an empty map makes the
  * broadcast a no-op, which is why the datapath also gates on the FAR before
- * redirecting. Two maps because the real egress device is fixed per direction. */
+ * redirecting. Two maps because the real egress device is fixed per direction.
+ * The value is bpf_devmap_val, not a bare ifindex, so the mirror entry can also
+ * carry a per-device egress program that re-encapsulates the copy toward the
+ * collector while the real-egress entry stays a plain forward. */
 struct
 {
     __uint(type, BPF_MAP_TYPE_DEVMAP);
-    __type(key, __u32);
-    __type(value, __u32);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(struct bpf_devmap_val));
     __uint(max_entries, 2);
 } mirror_devmap_dl SEC(".maps");
 
 struct
 {
     __uint(type, BPF_MAP_TYPE_DEVMAP);
-    __type(key, __u32);
-    __type(value, __u32);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(struct bpf_devmap_val));
     __uint(max_entries, 2);
 } mirror_devmap_ul SEC(".maps");
