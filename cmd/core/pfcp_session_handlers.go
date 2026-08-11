@@ -610,25 +610,39 @@ func composeFarInfo(far *ie.IE, farInfo ebpf.FarInfo) (ebpf.FarInfo, error) {
 		farInfo.TransportLevelMarking = transportLevelMarking
 	}
 	// Duplicating Parameters carry the mirror target: a second GTP-U copy of the
-	// matched packet toward an interception collector. The action's FAR_DUPL bit
+	// matched packet toward an interception collector. The Apply Action DUPL bit
 	// (already folded into farInfo.Action above) gates whether the datapath acts
-	// on it; here we only harvest the destination TEID and peer address.
-	var dupl []*ie.IE
-	var derr error
-	if far.Type == ie.CreateFAR {
-		dupl, derr = far.DuplicatingParameters()
-	} else if far.Type == ie.UpdateFAR {
-		dupl, derr = far.UpdateDuplicatingParameters()
-	}
-	if derr == nil {
-		if idx := findIEindex(dupl, 84); idx != -1 { // Outer Header Creation
-			if ohc, e := dupl[idx].OuterHeaderCreation(); e == nil {
-				farInfo.DuplOuterHeaderCreation = uint8(ohc.OuterHeaderCreationDescription >> 8)
-				farInfo.DuplTeid = ohc.TEID
-				if ohc.HasIPv4() {
-					farInfo.DuplRemoteIP = binary.LittleEndian.Uint32(ohc.IPv4Address)
+	// on it; here we harvest the destination TEID and peer address. A FAR that
+	// asks to duplicate must not be accepted as a silently un-intercepted
+	// session: an IPv6 collector fails the same way the primary forwarding path
+	// does, and any other missing or unusable target is logged, so an operator
+	// always gets a signal that a mandated intercept did not arm.
+	const applyActionDUPL = 0x10 // TS 29.244 Apply Action, DUPL bit
+	if farInfo.Action&applyActionDUPL != 0 {
+		var dupl []*ie.IE
+		var derr error
+		if far.Type == ie.CreateFAR {
+			dupl, derr = far.DuplicatingParameters()
+		} else if far.Type == ie.UpdateFAR {
+			dupl, derr = far.UpdateDuplicatingParameters()
+		}
+		if derr == nil {
+			if idx := findIEindex(dupl, 84); idx != -1 { // Outer Header Creation
+				if ohc, e := dupl[idx].OuterHeaderCreation(); e == nil {
+					if ohc.HasIPv6() {
+						log.Warn().Msg("IPv6 interception collector not supported yet, ignoring")
+						return ebpf.FarInfo{}, fmt.Errorf("IPv6 not supported yet")
+					}
+					farInfo.DuplOuterHeaderCreation = uint8(ohc.OuterHeaderCreationDescription >> 8)
+					farInfo.DuplTeid = ohc.TEID
+					if ohc.HasIPv4() {
+						farInfo.DuplRemoteIP = binary.LittleEndian.Uint32(ohc.IPv4Address)
+					}
 				}
 			}
+		}
+		if farInfo.DuplRemoteIP == 0 {
+			log.Warn().Msg("FAR requests duplication but no usable interception target was programmed; not arming interception")
 		}
 	}
 	return farInfo, nil
